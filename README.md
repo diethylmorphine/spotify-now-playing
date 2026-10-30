@@ -1,323 +1,221 @@
-# spotify-now-playing
+# Spotify Now Playing API
 
-A tiny serverless API that returns JSON with the track that is **currently** playing on **your** Spotify account.
+A Vercel endpoint: `GET /api/now-playing`.
 
-Used, for example, on this profile card:  
-`https://diethylmorphine.github.io` – the **Now Playing** block and album cover.
-
-The API endpoint looks like:
-
-```text
-GET https://your-project-name.vercel.app/api/now-playing
-```
-
-Example response:
+Successful JSON remains:
 
 ```json
-{
-  "is_playing": true,
-  "title": "Tokyo Rain (Slowed + Reverb)",
-  "artist": "Yavomag, Rubikdice, Chilx",
-  "url": "https://open.spotify.com/track/2FdyFBXsCE7IMq4cZ48pVU",
-  "album": "Tokyo Rain (Slowed + Reverb)",
-  "album_image": "https://i.scdn.co/image/ab67616d0000b273c3872886570e73f637a362c7",
-  "progress_ms": 49636,
-  "duration_ms": 158774
+{"is_playing":true,"title":"Track","artist":"Artist 1, Artist 2","url":"https://open.spotify.com/track/...","album":"Album","album_image":"https://i.scdn.co/image/...","progress_ms":49636,"duration_ms":158774}
+```
+
+No current item (including Spotify 204) returns HTTP 200 with
+`{"is_playing":false}`. The existing 202 fallback is retained. Paused tracks can
+retain metadata with is_playing false. OPTIONS returns 200 without a body.
+CORS remains origin *, methods GET/OPTIONS, allowed headers Content-Type.
+Responses use Cache-Control: no-store; other methods return 405.
+
+## Spotify requirements (official docs checked 2026-10-30)
+
+- [Development Mode](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)
+  requires **Premium for the app owner** and an allowlisted authorizing account
+  under Dashboard → Settings → Users Management / Users and Access. Login can
+  succeed outside the allowlist while API calls return 403. The documented cap
+  is five users; existing apps may retain grandfathered users. Extended Quota
+  Mode has different access rules.
+- [Currently playing](https://developer.spotify.com/documentation/web-api/reference/get-the-users-currently-playing-track)
+  remains GET https://api.spotify.com/v1/me/player/currently-playing with a Bearer
+  user access token and **user-read-currently-playing**.
+  user-read-playback-state is unnecessary for this endpoint.
+- [Redirect URIs](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
+  must match exactly. Use **https://example.org/callback** without a trailing
+  slash for both authorization and exchange. The old README's different host
+  did not match this app's registration.
+- [Refresh tokens](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens)
+  expire **six months after authorization**. Access-token refresh does not extend
+  that lifetime. expires_in describes the access token (about one hour).
+  invalid_grant means expired, revoked, or otherwise invalid: it does not prove
+  expiration alone. Reauthorize instead of retrying that token.
+  The [expiration announcement](https://developer.spotify.com/blog/2026-06-18-refresh-token-expiration)
+  applied to new apps June 18, 2026 and existing apps July 20, 2026.
+
+Use the existing Dashboard app. Client IDs are public; secrets, codes and tokens
+are private. This endpoint reads metadata, not audio or playback controls.
+
+## Get a refresh token in Windows PowerShell
+
+Works in Windows PowerShell 5.1 and PowerShell 7. Keep the **same session** open.
+Use Invoke-RestMethod, not Bash curl syntax (Windows PowerShell aliases curl to
+Invoke-WebRequest).
+
+### 1. Authorize
+
+```powershell
+$clientId = 'f8d708f33b244480a83b1542e6556e30'
+$redirectUri = 'https://example.org/callback'
+$scope = 'user-read-currently-playing'
+$state = [guid]::NewGuid().ToString('N')
+$authorizeUrl = 'https://accounts.spotify.com/authorize?client_id=' +
+    [uri]::EscapeDataString($clientId) + '&response_type=code&redirect_uri=' +
+    [uri]::EscapeDataString($redirectUri) + '&scope=' +
+    [uri]::EscapeDataString($scope) + '&state=' +
+    [uri]::EscapeDataString($state) + '&show_dialog=true'
+Start-Process $authorizeUrl
+```
+
+Sign into the account whose activity you want to publish and approve access.
+Copy the complete browser address beginning
+`https://example.org/callback?code=...&state=...`, even if the page shows an
+error/404. This repository does not host the callback. Keep that URL private.
+
+**The callback code is a short-lived authorization code, not a refresh token.**
+Exchange it once. Never put it in SPOTIFY_REFRESH_TOKEN. Never reuse earlier
+codes, including anything previously shared in chat. Authorize again if it
+expires or was already exchanged.
+
+Parse the callback, decode query parameters and validate state:
+
+```powershell
+$callbackUri = [uri](Read-Host 'Paste the complete callback URL')
+if ($callbackUri.GetLeftPart([System.UriPartial]::Path) -cne $redirectUri) {
+    throw 'Unexpected callback URI. Start authorization again.'
 }
-```
-
-## What you need
-
-1. Spotify account (regular is fine, not necessarily Premium).
-2. GitHub account.
-3. Vercel account ([vercel.com](https://vercel.com)) – free plan is enough.
-4. Basic ability to copy‑paste commands and strings 🙂
-
----
-
-## Step 1. Create an app in Spotify Dashboard
-
-1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/).
-2. Click **Create app**.
-3. Give it any name, e.g. `my-now-playing`.
-4. In app settings (**Edit Settings**), add this string to **Redirect URIs**:
-
-   ```text
-   https://example.com/callback
-   ```
-
-   > Yes, this exact domain; we only use it to get an authorization code.
-
-5. Click **Save**.
-6. Copy:
-   - **Client ID**
-   - **Client Secret**
-
-You will need them later.
-
----
-
-## Step 2. Get the `refresh_token`
-
-The `refresh_token` lets the server obtain fresh `access_token`s without your interaction.
-
-### 2.1. Get the `code` via browser
-
-Build this URL (insert your `CLIENT_ID`):
-
-```text
-https://accounts.spotify.com/authorize?client_id=CLIENT_ID&response_type=code&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&scope=user-read-currently-playing%20user-read-playback-state
-```
-
-1. Open this URL in your browser.
-2. Spotify will ask for permissions – click **Agree**.
-3. You’ll be redirected to a URL like:
-
-   ```text
-   https://example.com/callback?code=VERY_LONG_STRING&state=...
-   ```
-
-4. Copy the whole URL and extract the value of the `code` parameter – everything between `code=` and `&state=`:
-
-   ```text
-   AUTH_CODE = VERY_LONG_STRING
-   ```
-
-### 2.2. Exchange `code` → `refresh_token`
-
-Run this in your terminal (replace the placeholders):
-
-```bash
-curl -X POST "https://accounts.spotify.com/api/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&client_id=CLIENT_ID&client_secret=CLIENT_SECRET"
-```
-
-If everything is correct, you’ll get JSON like:
-
-```json
-{
-  "access_token": "BQAz...",
-  "token_type": "Bearer",
-  "expires_in": 3600,
-  "refresh_token": "AQAd...THIS_IS_WHAT_WE_NEED...",
-  "scope": "user-read-playback-state user-read-currently-playing"
-}
-```
-
-Copy the `refresh_token` value and store it somewhere safe – you’ll need it on Vercel.
-
----
-
-## Step 3. Deploy this repo to Vercel
-
-### 3.1. Fork or import the repository
-
-1. Click **Fork** on GitHub or create your own repo from these files.
-2. Log in to [Vercel](https://vercel.com) with GitHub.
-3. Click **Add New Project** → select your fork (e.g. `spotify-now-playing`).
-
-Vercel will automatically detect:
-
-- `api/now-playing.js`
-- `package.json`
-
-No extra config is necessary.
-
-### 3.2. Configure environment variables
-
-In your Vercel project:
-
-1. Go to **Settings → Environment Variables**.
-2. Add:
-
-   ```text
-   SPOTIFY_CLIENT_ID        = your Client ID
-   SPOTIFY_CLIENT_SECRET    = your Client Secret
-   SPOTIFY_REFRESH_TOKEN    = your refresh_token
-   ```
-
-3. Save and trigger a **Redeploy** (or just wait for the first deploy to finish).
-
-After deployment you’ll get a URL like:
-
-```text
-https://your-now-playing-project.vercel.app
-```
-
-Test the API:
-
-```text
-https://your-now-playing-project.vercel.app/api/now-playing
-```
-
-- If nothing is playing in Spotify you’ll get:
-
-  ```json
-  { "is_playing": false }
-  ```
-
-- If a track is playing you’ll see JSON with `title`, `artist`, `album_image`, etc.
-
----
-
-## Step 4. Use the API on your site
-
-Example usage in plain HTML:
-
-```html
-<div class="player">
-  <div class="track-info">
-    <span id="track-title">loading...</span>
-    <span id="track-artist">please wait...</span>
-  </div>
-  <div class="progress">
-    <div id="progress-bar"></div>
-  </div>
-</div>
-
-<div class="now-playing-cover">
-  <img id="track-cover" src="" alt="album cover" />
-</div>
-
-<script>
-  (function () {
-    const API_URL = "https://your-now-playing-project.vercel.app/api/now-playing";
-
-    const titleEl = document.getElementById("track-title");
-    const artistEl = document.getElementById("track-artist");
-    const progressBarEl = document.getElementById("progress-bar");
-    const coverImg = document.getElementById("track-cover");
-
-    function setNothing() {
-      titleEl.textContent = "nothing is playing";
-      artistEl.textContent = "Spotify";
-      if (progressBarEl) progressBarEl.style.width = "0%";
-      if (coverImg) coverImg.src = "";
+$query = @{}
+foreach ($pair in $callbackUri.Query.TrimStart('?').Split('&')) {
+    $parts = $pair.Split('=', 2)
+    $key = [uri]::UnescapeDataString($parts[0].Replace('+', ' '))
+    $value = ''
+    if ($parts.Length -eq 2) {
+        $value = [uri]::UnescapeDataString($parts[1].Replace('+', ' '))
     }
+    if ($query.ContainsKey($key)) { throw 'Duplicate callback parameter.' }
+    $query[$key] = $value
+}
+if ($query['state'] -cne $state) { throw 'State mismatch. Authorize again.' }
+if ($query.ContainsKey('error')) { throw 'Authorization denied. Start again.' }
+$authorizationCode = $query['code']
+if ([string]::IsNullOrWhiteSpace($authorizationCode)) { throw 'No authorization code.' }
+```
 
-    async function fetchNowPlaying() {
-      try {
-        const res = await fetch(API_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error("Bad response");
-        const data = await res.json();
+### 2. Exchange the code
 
-        if (!data || data.is_playing === false) {
-          setNothing();
-          return;
-        }
+The [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow)
+requires POST form data with grant_type=authorization_code, decoded code and
+the exact same redirect_uri. Use HTTP Basic client authentication. Prompting
+keeps the secret out of shell history:
 
-        titleEl.textContent = data.title || "unknown track";
-        artistEl.textContent = data.artist || "unknown artist";
-
-        if (progressBarEl && data.duration_ms && data.progress_ms != null) {
-          const percent = Math.min(
-            100,
-            Math.max(0, (data.progress_ms / data.duration_ms) * 100)
-          );
-          progressBarEl.style.width = percent + "%";
-        }
-
-        if (coverImg && data.album_image) {
-          coverImg.src = data.album_image;
-          coverImg.alt = data.album || "Album cover";
-        }
-      } catch (err) {
-        console.error("now-playing error", err);
-        setNothing();
-      }
+```powershell
+$secretSecure = Read-Host 'Spotify client secret (hidden)' -AsSecureString
+$clientSecret = [System.Net.NetworkCredential]::new('', $secretSecure).Password
+$basic = [Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes($clientId + ':' + $clientSecret)
+)
+$tokenRequest = @{
+    Uri = 'https://accounts.spotify.com/api/token'
+    Method = 'Post'
+    Headers = @{ Authorization = 'Basic ' + $basic }
+    ContentType = 'application/x-www-form-urlencoded'
+    Body = @{
+        grant_type = 'authorization_code'
+        code = $authorizationCode
+        redirect_uri = $redirectUri
     }
-
-    setNothing();
-    fetchNowPlaying();
-    setInterval(fetchNowPlaying, 15000);
-  })();
-</script>
+}
+$tokens = Invoke-RestMethod @tokenRequest
+if ([string]::IsNullOrWhiteSpace($tokens.refresh_token)) { throw 'No refresh token returned.' }
+if (($tokens.scope -split '\s+') -notcontains 'user-read-currently-playing') {
+    throw 'Required scope not granted. Authorize again.'
+}
+Set-Clipboard -Value $tokens.refresh_token
+Write-Host 'Refresh token copied. Paste into SPOTIFY_REFRESH_TOKEN in Vercel.'
 ```
 
-You only need to change:
+Use $tokens.refresh_token, not $tokens.access_token or $authorizationCode.
+For failed exchanges check matching URI, credentials, and fresh unused code.
+Do not publish requests/token responses. After saving in Vercel, clear the
+clipboard and close the shell:
 
-```js
-const API_URL = "https://your-now-playing-project.vercel.app/api/now-playing";
+```powershell
+Set-Clipboard -Value ''
+Remove-Variable tokens, tokenRequest, basic, clientSecret, secretSecure, authorizationCode, callbackUri, query
 ```
 
----
+## Deploy to Vercel
 
-## API response format
+Import the GitHub repository, framework **Other**, repository root, no custom
+build command/output directory. api/now-playing.js is the function. The package
+explicitly uses ES modules and Node.js 24 (native fetch and timeout signals).
 
-The API always returns JSON. There are two main cases:
+Set these in Settings → Environment Variables → **Production** (and separately
+Preview/Development if needed):
 
-### 1. Nothing is playing
+| Variable | Value |
+| --- | --- |
+| SPOTIFY_CLIENT_ID | The client ID above |
+| SPOTIFY_CLIENT_SECRET | The secret from the same Dashboard app |
+| SPOTIFY_REFRESH_TOKEN | The refresh token from the exchange |
 
-```json
-{
-  "is_playing": false
+Paste raw values without quotes, whitespace or Bearer prefixes. Never commit
+secrets/.env files. **Redeploy after changing environment variables.** Pushes to
+the configured production branch (normally main) deploy when Git integration
+is enabled.
+
+The function refreshes on each GET using the environment token. It has no
+interactive OAuth or durable token store. A stateful app must securely persist
+any replacement refresh token Spotify returns; this static setup requires
+updating Vercel with a fresh token and redeploying if the configured token stops
+working. In-memory replacement cannot survive separate serverless instances.
+Plan to reauthorize at least every six months; record the authorization date
+privately.
+
+## Diagnostics
+
+Failures contain safe error, code, stage and (when Spotify replied)
+spotify_status. Logs contain only code/stage/status, never upstream bodies,
+headers, exception text or credentials. Failures do not masquerade as idle.
+
+| HTTP | Code | Action |
+| --- | --- | --- |
+| 500 | SPOTIFY_CONFIG_MISSING | Set all three variables in the right environment; redeploy. |
+| 502 | SPOTIFY_INVALID_CLIENT | Check matching ID/secret, reset secrets and pasted quotes. |
+| 502 | SPOTIFY_REAUTH_REQUIRED | invalid_grant: authorize again, exchange fresh code, replace refresh token, redeploy. Expiration, revocation, wrong app or an authorization code stored as a refresh token are possible. |
+| 403 | SPOTIFY_MISSING_SCOPE | Reauthorize with user-read-currently-playing. Refreshing cannot add scopes. |
+| 403 | SPOTIFY_ACCESS_DENIED | Check owner Premium, allowlist, scopes and app restrictions. A generic 403 cannot identify the exact restriction. |
+| 502 | SPOTIFY_ACCESS_TOKEN_REJECTED | Newly refreshed token rejected; check app authorization/credentials. |
+| 429 | SPOTIFY_RATE_LIMITED | Back off; honor numeric Retry-After when present (also exposed through CORS). |
+| 429 | SPOTIFY_QUOTA_EXCEEDED | Explicit QUOTA_EXCEEDED; check shared developer quota. |
+| 502 | SPOTIFY_UPSTREAM_ERROR | Check stage/status; retry later for upstream 5xx. |
+| 502 | SPOTIFY_INVALID_RESPONSE | Invalid playback JSON or missing access token. |
+| 502 / 504 | SPOTIFY_NETWORK_ERROR / SPOTIFY_TIMEOUT | Connection failure or eight-second per-request timeout. |
+
+[Rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)
+and [development quotas](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)
+are distinct. This public endpoint makes Spotify requests per GET; avoid
+aggressive polling, honor 429/backoff, and do not loop on invalid_grant.
+No automatic retries are made.
+
+Redirect URI mismatches affect initial authorization/exchange, not refresh.
+Before this fix production returned `500 {"error":"Failed to refresh token"}`,
+confirming token-refresh stage failure without identifying Spotify's reason.
+
+If is_playing is false, play a track in the account you authorized.
+
+## Usage and checks
+
+```javascript
+const response = await fetch('https://spotify-now-playing-roan-delta.vercel.app/api/now-playing');
+const data = await response.json();
+if (!response.ok) {
+  console.error(data.code, data.stage, data.spotify_status);
+} else {
+  console.log(data); // Render existing track fields or idle response.
 }
 ```
 
-### 2. Something is playing
+With Node.js 24, run `node --check api/now-playing.js` and `node --test`.
+Tests mock Spotify and need no credentials. With npm installed, `npm run check`
+and `npm test` are equivalent. `npm start` expects a separately installed
+Vercel CLI (`vercel dev`).
 
-```json
-{
-  "is_playing": true,
-  "title": "Track Name",
-  "artist": "Artist 1, Artist 2",
-  "url": "https://open.spotify.com/track/...",
-  "album": "Album Name",
-  "album_image": "https://i.scdn.co/image/...",
-  "progress_ms": 49636,
-  "duration_ms": 158774
-}
-```
-
-Fields:
-
-- `is_playing` – whether something is currently playing.
-- `title` – track name.
-- `artist` – artist names, comma separated.
-- `url` – link to the track on Spotify.
-- `album` – album name.
-- `album_image` – album cover URL (square 300–640px usually).
-- `progress_ms` – current playback position (milliseconds).
-- `duration_ms` – total track length (milliseconds).
-
----
-
-## Security & privacy
-
-- The API only uses scopes:
-  - `user-read-currently-playing`
-  - `user-read-playback-state`
-- These scopes **do not** grant access to playlists, likes, etc. – only “what is currently playing”.
-- `client_id`, `client_secret` and `refresh_token` are stored **only** in Vercel environment variables.
-- The repository can stay public; there is nothing secret in the code.
-
----
-
-## Troubleshooting
-
-**`INVALID_CLIENT: Invalid redirect URI` during authorization**
-
-- Make sure **Redirect URIs** in Spotify Dashboard contains exactly:
-  `https://example.com/callback`
-- And the authorization URL uses the encoded version:
-  `redirect_uri=https%3A%2F%2Fexample.com%2Fcallback`
-
-**`/api/now-playing` returns 500**
-
-- Check that all three env vars are set on Vercel:
-  - `SPOTIFY_CLIENT_ID`
-  - `SPOTIFY_CLIENT_SECRET`
-  - `SPOTIFY_REFRESH_TOKEN`
-- Redeploy your project.
-
-**API always returns `is_playing: false`**
-
-- Ensure Spotify is open and a track is actually playing.
-- Sometimes switching the playback device (phone ↔ desktop) helps.
-
----
-
-## License
-
-MIT – feel free to fork, use in your sites/portfolios, and modify as you like.
+This API deliberately publishes one account's listening metadata publicly.
+Only user-read-currently-playing is needed. Keep client secrets and tokens in
+server-side environment variables or a secure secret store.

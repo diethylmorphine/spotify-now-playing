@@ -2,7 +2,13 @@
   "name": "now-playing-api",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
-    "start": "vercel dev"
+    "start": "vercel dev",
+    "test": "node --test",
+    "check": "node --check api/now-playing.js"
   }
 }
